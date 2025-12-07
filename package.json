@@ -1,0 +1,27 @@
+{
+  "name": "untrusted-code-executor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Monorepo for untrusted JavaScript code executor with AWS Lambda",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "build:lambda": "cd packages/lambda && cargo lambda build --release --arm64",
+    "build:sdk": "npm run build --workspace=@untrusted-code/sdk",
+    "build:iac": "npm run build --workspace=@untrusted-code/iac",
+    "deploy": "npm run build:lambda && npm run build:iac && npm run deploy --workspace=@untrusted-code/iac",
+    "synth": "npm run synth --workspace=@untrusted-code/iac",
+    "diff": "npm run diff --workspace=@untrusted-code/iac",
+    "destroy": "npm run destroy --workspace=@untrusted-code/iac",
+    "clean": "rm -rf packages/*/dist packages/*/node_modules packages/lambda/target node_modules"
+  },
+  "keywords": ["aws", "lambda", "rust", "quickjs", "sandbox", "monorepo"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0"
+  }
+}

@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+packages/*/node_modules/
+
+# Build outputs
+packages/sdk/dist/
+packages/iac/lib/*.js
+packages/iac/lib/*.d.ts
+packages/iac/bin/*.js
+packages/iac/bin/*.d.ts
+packages/lambda/target/
+*.tsbuildinfo
+
+# CDK
+cdk.out/
+.cdk.staging/
+
+# Rust
+**/target/
+**/*.rs.bk
+Cargo.lock
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+
+# Build artifacts
+*.zip
+bootstrap
