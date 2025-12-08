@@ -11,6 +11,8 @@
     "build:lambda": "cd packages/lambda && cargo lambda build --release --arm64",
     "build:sdk": "npm run build --workspace=@untrusted-code/sdk",
     "build:iac": "npm run build --workspace=@untrusted-code/iac",
+    "test": "npm test --workspace=@untrusted-code/sdk",
+    "test:watch": "npm run test:watch --workspace=@untrusted-code/sdk",
     "deploy": "npm run build:lambda && npm run build:iac && npm run deploy --workspace=@untrusted-code/iac",
     "synth": "npm run synth --workspace=@untrusted-code/iac",
     "diff": "npm run diff --workspace=@untrusted-code/iac",

@@ -8,20 +8,31 @@ TypeScript SDK for executing untrusted JavaScript code in AWS Lambda sandbox.
 npm install @untrusted-code/sdk
 ```
 
+## Development
+
+```bash
+# Install dependencies
+npm install
+
+# Build the SDK
+npm run build
+
+# Run tests
+npm test
+
+# Run tests in watch mode
+npm run test:watch
+```
+
 ## Usage
 
 ### Basic Usage
 
 ```typescript
-import { UntrustedCodeClient } from '@untrusted-code/sdk';
+import { runUntrustedCode } from '@untrusted-code/sdk';
 
-const client = new UntrustedCodeClient({
-  functionName: 'your-lambda-function-name',
-  region: 'us-east-1'
-});
-
-// Execute code
-const result = await client.runUntrustedCode({
+// Uses SANDBOX_FUNCTION_NAME env var
+const result = await runUntrustedCode({
   code: '2 + 2'
 });
 
@@ -30,26 +41,27 @@ console.log(result.success); // true
 console.log(result.executionTimeMs); // e.g., 15
 ```
 
-### Standalone Function
+### With Explicit Function Name
 
 ```typescript
 import { runUntrustedCode } from '@untrusted-code/sdk';
 
-// Uses LAMBDA_FUNCTION_NAME and AWS_REGION env vars
 const result = await runUntrustedCode({
-  code: 'console.log("Hello"); return 42;'
+  code: 'console.log("Hello"); return 42;',
+  functionName: 'your-lambda-function-name'
 });
 
 console.log(result.result); // 42
 console.log(result.consoleOutput); // ['[log] Hello']
 ```
 
-### With Timeout
+### With Timeout and Memory Limits
 
 ```typescript
-const result = await client.runUntrustedCode({
+const result = await runUntrustedCode({
   code: 'while(true) {}',
-  timeoutMs: 1000
+  timeoutMs: 1000,
+  memoryLimitBytes: 10 * 1024 * 1024 // 10MB
 });
 
 console.log(result.success); // false
@@ -60,7 +72,7 @@ console.log(result.error); // 'Execution timeout exceeded'
 
 ```typescript
 try {
-  const result = await client.runUntrustedCode({
+  const result = await runUntrustedCode({
     code: 'throw new Error("Oops!")'
   });
 
@@ -75,10 +87,10 @@ try {
 ### Batch Execution
 
 ```typescript
-const results = await client.batchExecute([
-  { code: '1 + 1' },
-  { code: '2 * 2' },
-  { code: '3 ** 3' }
+const results = await Promise.all([
+  runUntrustedCode({ code: '1 + 1' }),
+  runUntrustedCode({ code: '2 * 2' }),
+  runUntrustedCode({ code: '3 ** 3' })
 ]);
 
 results.forEach(r => console.log(r.result));
@@ -88,7 +100,7 @@ results.forEach(r => console.log(r.result));
 ### Data Transformation
 
 ```typescript
-const result = await client.runUntrustedCode({
+const result = await runUntrustedCode({
   code: `
     const data = [
       { name: 'Alice', score: 85 },
@@ -111,7 +123,7 @@ The sandbox supports `fetch()` with domain allowlisting for secure network acces
 
 ```typescript
 // Basic fetch example
-const result = await client.runUntrustedCode({
+const result = await runUntrustedCode({
   code: `
     const response = fetch('https://api.github.com/users/github');
     response.ok ? response.json : { error: response.error }
@@ -122,11 +134,11 @@ const result = await client.runUntrustedCode({
 console.log(result.result); // { login: 'github', ... }
 ```
 
-Using the helper method:
+Advanced example:
 
 ```typescript
-const result = await client.runWithNetworking(
-  `
+const result = await runUntrustedCode({
+  code: `
     const response = fetch('https://httpbin.org/get');
     if (!response.ok) {
       ({ error: response.error })
@@ -134,8 +146,8 @@ const result = await client.runWithNetworking(
       ({ status: response.status, data: response.json })
     }
   `,
-  ['httpbin.org']
-);
+  allowedDomains: ['httpbin.org']
+});
 ```
 
 **Security Features:**
@@ -158,25 +170,17 @@ const result = await client.runWithNetworking(
 
 ## API Reference
 
-### `UntrustedCodeClient`
+### `runUntrustedCode(options: RunUntrustedCodeOptions): Promise<ExecuteResponse>`
 
-Constructor options:
-- `functionName: string` - AWS Lambda function name or ARN
-- `region?: string` - AWS region (optional)
-- `lambdaClient?: LambdaClient` - Custom Lambda client (optional)
+Execute untrusted JavaScript code in a secure AWS Lambda sandbox.
 
-Methods:
-- `runUntrustedCode(request: ExecuteRequest): Promise<ExecuteResponse>` - Execute code
-- `runWithTimeout(code: string, timeoutMs: number): Promise<ExecuteResponse>` - Execute with timeout
-- `runWithMemoryLimit(code: string, memoryLimitBytes: number): Promise<ExecuteResponse>` - Execute with memory limit
-- `runWithNetworking(code: string, allowedDomains: string[]): Promise<ExecuteResponse>` - Execute with network access
-- `batchExecute(requests: ExecuteRequest[]): Promise<ExecuteResponse[]>` - Execute multiple codes in parallel
-
-### `ExecuteRequest`
+### `RunUntrustedCodeOptions`
 
 ```typescript
-interface ExecuteRequest {
-  code: string;
+interface RunUntrustedCodeOptions {
+  code: string;              // JavaScript code to execute
+  functionName?: string;     // AWS Lambda function name (defaults to SANDBOX_FUNCTION_NAME env var)
+  region?: string;           // AWS region (auto-detected from AWS SDK)
   timeoutMs?: number;        // Default: 5000, Max: 25000
   memoryLimitBytes?: number; // Default: 10MB, Max: 50MB
   allowedDomains?: string[]; // Default: [] (no network access)
@@ -197,8 +201,12 @@ interface ExecuteResponse {
 
 ## Environment Variables
 
-- `LAMBDA_FUNCTION_NAME` - Default function name for standalone function
-- `AWS_REGION` - Default AWS region
+- `SANDBOX_FUNCTION_NAME` - Default Lambda function name (required if not specified in options)
+- AWS SDK automatically picks up region from:
+  - `AWS_REGION` environment variable
+  - AWS credentials file
+  - EC2 instance metadata
+  - ECS container metadata
 
 ## Security
 

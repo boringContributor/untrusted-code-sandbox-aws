@@ -1,9 +1,21 @@
 /**
- * Request interface for executing JavaScript code
+ * Options for executing JavaScript code
  */
-export interface ExecuteRequest {
+export interface RunUntrustedCodeOptions {
   /** The JavaScript code to execute */
   code: string;
+
+  /**
+   * AWS Lambda function name or ARN
+   * Defaults to SANDBOX_FUNCTION_NAME environment variable
+   */
+  functionName?: string;
+
+  /**
+   * AWS region
+   * Automatically picked up from AWS SDK default credential chain
+   */
+  region?: string;
 
   /** Optional timeout in milliseconds (default: 5000, max: 25000) */
   timeoutMs?: number;
@@ -21,6 +33,16 @@ export interface ExecuteRequest {
    * @default [] (no network access)
    * @example ['api.example.com', 'httpbin.org']
    */
+  allowedDomains?: string[];
+}
+
+/**
+ * Request interface sent to Lambda (internal)
+ */
+export interface ExecuteRequest {
+  code: string;
+  timeoutMs?: number;
+  memoryLimitBytes?: number;
   allowedDomains?: string[];
 }
 
@@ -44,16 +66,3 @@ export interface ExecuteResponse {
   consoleOutput: string[];
 }
 
-/**
- * Configuration options for the SDK client
- */
-export interface UntrustedCodeClientConfig {
-  /** AWS Lambda function name or ARN */
-  functionName: string;
-
-  /** AWS region (optional, defaults to SDK default region) */
-  region?: string;
-
-  /** Custom Lambda client (optional) */
-  lambdaClient?: any;
-}
