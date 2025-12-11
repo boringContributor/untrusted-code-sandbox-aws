@@ -22,9 +22,9 @@ struct ExecuteRequest {
     #[serde(default)]
     allowed_domains: Vec<String>,
 
-    /// Optional options object to pass to the main function
+    /// Optional input object to pass to the main function
     #[serde(default)]
-    options: Option<serde_json::Value>,
+    input: Option<serde_json::Value>,
 }
 
 fn default_timeout() -> u64 {
@@ -116,7 +116,7 @@ async fn function_handler(event: LambdaEvent<ExecuteRequest>) -> Result<ExecuteR
         timeout_ms,
         memory_limit,
         &allowed_domains_refs,
-        request.options,
+        request.input,
     ) {
         Ok(result) => {
             let execution_time = start.elapsed().as_millis();

@@ -40,15 +40,15 @@ import { ExecuteRequest, ExecuteResponse, RunUntrustedCodeOptions, StructuredErr
  *   allowedDomains: ['api.example.com']
  * });
  *
- * // With options parameter
+ * // With input parameter
  * const result = await runUntrustedCode({
  *   code: `
- *     // options parameter is automatically available
- *     const response = await fetch(options.apiUrl);
+ *     // input parameter is automatically available
+ *     const response = await fetch(input.apiUrl);
  *     const data = await response.json();
- *     return { userId: options.userId, data };
+ *     return { userId: input.userId, data };
  *   `,
- *   options: {
+ *   input: {
  *     userId: '123',
  *     apiUrl: 'https://api.example.com/users/123'
  *   },
@@ -78,7 +78,7 @@ export async function runUntrustedCode(
     timeoutMs: options.timeoutMs,
     memoryLimitBytes: options.memoryLimitBytes,
     allowedDomains: options.allowedDomains,
-    options: options.options,
+    input: options.input,
   };
 
   const command = new InvokeCommand({

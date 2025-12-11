@@ -42,7 +42,7 @@ pub fn execute_js(
     timeout_ms: u64,
     memory_limit: usize,
     allowed_domains: &[&str],
-    options: Option<serde_json::Value>,
+    input: Option<serde_json::Value>,
 ) -> Result<ExecutionResult> {
     // Create QuickJS runtime with memory limit
     let runtime = Runtime::new()?;
@@ -72,24 +72,24 @@ pub fn execute_js(
     let result = context.with(|ctx| {
         setup_sandbox(&ctx, console.clone(), allowed_domains)?;
 
-        // Inject the options object into the global scope
-        if let Some(opts) = options {
-            let opts_json = serde_json::to_string(&opts)?;
-            let opts_code = format!("globalThis.__userOptions = {};", opts_json);
-            ctx.eval::<(), _>(opts_code.as_str())?;
+        // Inject the input object into the global scope
+        if let Some(inp) = input {
+            let input_json = serde_json::to_string(&inp)?;
+            let input_code = format!("globalThis.__userInput = {};", input_json);
+            ctx.eval::<(), _>(input_code.as_str())?;
         } else {
-            ctx.eval::<(), _>("globalThis.__userOptions = undefined;")?;
+            ctx.eval::<(), _>("globalThis.__userInput = undefined;")?;
         }
 
-        // Wrap user code in async main function with options parameter
+        // Wrap user code in async main function with input parameter
         let wrapped_code = format!(
-            r#"(async function main(options) {{
+            r#"(async function main(input) {{
     {}
-}})(globalThis.__userOptions)"#,
+}})(globalThis.__userInput)"#,
             code
         );
 
-        debug!("Executing JavaScript code wrapped in async main(options)");
+        debug!("Executing JavaScript code wrapped in async main(input)");
 
         // Evaluate the code - this returns a Promise
         let promise: rquickjs::Promise = ctx.eval(wrapped_code.as_str()).catch(&ctx).map_err(|e| {
@@ -578,25 +578,25 @@ mod tests {
     }
 
     #[test]
-    fn test_options_parameter() {
+    fn test_input_parameter() {
         let code = r#"
             return {
-                receivedOptions: options,
-                type: typeof options,
-                hasName: options && 'name' in options
+                receivedInput: input,
+                type: typeof input,
+                hasName: input && 'name' in input
             };
         "#;
-        let options = serde_json::json!({
+        let input = serde_json::json!({
             "name": "test",
             "value": 42
         });
-        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], Some(options)).unwrap();
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], Some(input)).unwrap();
 
         let obj = result.value.as_object().unwrap();
         assert_eq!(obj.get("type").unwrap(), &serde_json::json!("object"));
         assert_eq!(obj.get("hasName").unwrap(), &serde_json::json!(true));
 
-        let received = obj.get("receivedOptions").unwrap().as_object().unwrap();
+        let received = obj.get("receivedInput").unwrap().as_object().unwrap();
         assert_eq!(received.get("name").unwrap(), &serde_json::json!("test"));
         assert_eq!(received.get("value").unwrap(), &serde_json::json!(42));
     }
@@ -913,10 +913,10 @@ mod tests {
     }
 
     #[test]
-    fn test_options_property_access_when_undefined() {
+    fn test_input_property_access_when_undefined() {
         let code = r#"
-            // options is undefined, accessing property should fail
-            return options.someProperty;
+            // input is undefined, accessing property should fail
+            return input.someProperty;
         "#;
         let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None);
         assert!(result.is_err());

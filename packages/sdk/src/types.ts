@@ -17,6 +17,38 @@ export interface StructuredError {
 }
 
 /**
+ * Input data passed to user code
+ */
+export interface CodeInput {
+  /** Organization ID */
+  org_id?: string;
+
+  /** Entity data */
+  entity?: Record<string, unknown>;
+
+  /** Action configuration */
+  action_config?: any;
+
+  /** Application configuration */
+  app_config?: any;
+
+  /** Application options with token */
+  app_options?: Record<string, unknown>;
+
+  /** Execution ID */
+  execution_id?: string;
+
+  /** Execution status */
+  execution_status?: string;
+
+  /** Execution action ID */
+  execution_action_id?: string;
+
+  /** Trigger event data */
+  trigger_event?: any;
+}
+
+/**
  * Options for executing JavaScript code
  */
 export interface RunUntrustedCodeOptions {
@@ -54,19 +86,19 @@ export interface RunUntrustedCodeOptions {
   allowedDomains?: string[];
 
   /**
-   * Optional options object to pass to the user code
+   * Optional input object to pass to the user code
    *
-   * This object will be available as the `options` parameter in the async main function.
-   * User code is automatically wrapped in: `(async function main(options) { <user-code> })(options)`
+   * This object will be available as the `input` parameter in the async main function.
+   * User code is automatically wrapped in: `(async function main(input) { <user-code> })(input)`
    *
    * To skip automation, return an object with `skip_reason` or `error_reason`:
    * `return { skip_reason: "user_cancelled", ...otherData }`
    * `return { error_reason: "validation_failed", ...otherData }`
    *
    * @default undefined
-   * @example { userId: '123', apiKey: 'secret' }
+   * @example { org_id: '123', entity: {...}, action_config: {...}, app_config: {...}, app_options: {...}, execution_id: 'exec_123', execution_status: 'running', execution_action_id: 'action_456', trigger_event: {...} }
    */
-  options?: any;
+  input?: CodeInput;
 }
 
 /**
@@ -77,7 +109,7 @@ export interface ExecuteRequest {
   timeoutMs?: number;
   memoryLimitBytes?: number;
   allowedDomains?: string[];
-  options?: any;
+  input?: CodeInput;
 }
 
 /**

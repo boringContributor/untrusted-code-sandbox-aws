@@ -206,25 +206,35 @@ describe('runUntrustedCode', () => {
       expect(payload.allowedDomains).toEqual(['api.example.com']);
     });
 
-    it('should pass options parameter to Lambda', async () => {
+    it('should pass input parameter to Lambda', async () => {
       mockSend.mockResolvedValueOnce({
         Payload: new TextEncoder().encode(JSON.stringify({
           success: true,
-          result: { userId: '123', name: 'John' },
+          result: { org_id: '123', execution_id: 'exec_456' },
           executionTimeMs: 50,
           consoleOutput: [],
         })),
       });
 
       await runUntrustedCode({
-        code: 'return { userId: options.userId, name: options.name }',
-        options: { userId: '123', name: 'John' },
+        code: 'return { org_id: input.org_id, execution_id: input.execution_id }',
+        input: {
+          org_id: '123',
+          execution_id: 'exec_456',
+          entity: { name: 'Test Entity' },
+          app_config: { apiKey: 'test' }
+        },
       });
 
       const payload = JSON.parse(
         (InvokeCommand as any).mock.calls[0][0].Payload
       );
-      expect(payload.options).toEqual({ userId: '123', name: 'John' });
+      expect(payload.input).toEqual({
+        org_id: '123',
+        execution_id: 'exec_456',
+        entity: { name: 'Test Entity' },
+        app_config: { apiKey: 'test' }
+      });
     });
 
     it('should handle execution errors gracefully', async () => {
