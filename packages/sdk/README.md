@@ -78,11 +78,55 @@ try {
 
   if (!result.success) {
     console.error('Execution failed:', result.error);
+    console.error('Error reason:', result.error_reason); // Also populated with error
   }
 } catch (error) {
   console.error('Lambda invocation failed:', error);
 }
 ```
+
+### Skipping Execution and Error Reasons
+
+User code can signal skipping or errors by returning an object with `skip_reason` or `error_reason`:
+
+```typescript
+// Example: Skip execution based on user input
+const result = await runUntrustedCode({
+  code: `
+    if (options.userCancelled) {
+      return { skip_reason: "user_cancelled" };
+    }
+    // Normal execution
+    return { success: true, data: "processed" };
+  `,
+  options: { userCancelled: true }
+});
+
+console.log(result.skip_reason); // "user_cancelled"
+
+// Example: Report validation errors
+const result2 = await runUntrustedCode({
+  code: `
+    if (!options.email) {
+      return { error_reason: "validation_failed", message: "Email is required" };
+    }
+    return { email: options.email };
+  `,
+  options: {}
+});
+
+console.log(result2.error_reason); // "validation_failed"
+console.log(result2.result); // { error_reason: "validation_failed", message: "Email is required" }
+
+// Use the helper function to extract structured info
+import { getStructuredError } from '@untrusted-code/sdk';
+
+const structured = getStructuredError(result2);
+console.log(structured.errorOutput); // "validation_failed"
+console.log(structured.skipReason); // undefined
+```
+
+**Note:** Both `skip_reason` and `error_reason` are optional. If unexpected errors occur during execution, `error_reason` will be automatically populated.
 
 ### Batch Execution
 
@@ -191,11 +235,13 @@ interface RunUntrustedCodeOptions {
 
 ```typescript
 interface ExecuteResponse {
-  success: boolean;
-  result?: any;
-  error?: string;
-  executionTimeMs: number;
-  consoleOutput: string[];
+  success: boolean;            // Whether execution completed successfully
+  result?: any;                // The value returned from user code
+  error?: string;              // Error message from sandbox (if execution failed)
+  skip_reason?: string;        // Reason why execution was skipped (from user code)
+  error_reason?: string;       // Error reason from user code or unexpected errors
+  executionTimeMs: number;     // Execution time in milliseconds
+  consoleOutput: string[];     // Console output captured during execution
 }
 ```
 

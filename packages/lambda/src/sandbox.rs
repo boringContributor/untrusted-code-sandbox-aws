@@ -986,4 +986,68 @@ mod tests {
         let obj = result.value.as_object().unwrap();
         assert_eq!(obj.get("message").unwrap(), &serde_json::json!("First error"));
     }
+
+    #[test]
+    fn test_user_return_skip_reason() {
+        let code = r#"
+            return {
+                skip_reason: "user_cancelled",
+                additional_data: "some info"
+            };
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None).unwrap();
+        let obj = result.value.as_object().unwrap();
+        assert_eq!(obj.get("skip_reason").unwrap(), &serde_json::json!("user_cancelled"));
+        assert_eq!(obj.get("additional_data").unwrap(), &serde_json::json!("some info"));
+    }
+
+    #[test]
+    fn test_user_return_error_reason() {
+        let code = r#"
+            return {
+                error_reason: "validation_failed",
+                details: "Missing required field"
+            };
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None).unwrap();
+        let obj = result.value.as_object().unwrap();
+        assert_eq!(obj.get("error_reason").unwrap(), &serde_json::json!("validation_failed"));
+        assert_eq!(obj.get("details").unwrap(), &serde_json::json!("Missing required field"));
+    }
+
+    #[test]
+    fn test_user_return_both_reasons() {
+        let code = r#"
+            return {
+                skip_reason: "user_skip",
+                error_reason: "also_error",
+                data: 42
+            };
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None).unwrap();
+        let obj = result.value.as_object().unwrap();
+        assert_eq!(obj.get("skip_reason").unwrap(), &serde_json::json!("user_skip"));
+        assert_eq!(obj.get("error_reason").unwrap(), &serde_json::json!("also_error"));
+        assert_eq!(obj.get("data").unwrap(), &serde_json::json!(42));
+    }
+
+    #[test]
+    fn test_user_return_nothing() {
+        let code = r#"
+            // Don't return anything
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None).unwrap();
+        // Should return null/undefined
+        assert!(result.value.is_null());
+    }
+
+    #[test]
+    fn test_user_return_empty_object() {
+        let code = r#"
+            return {};
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None).unwrap();
+        let obj = result.value.as_object().unwrap();
+        assert!(obj.is_empty());
+    }
 }

@@ -1,2 +1,2 @@
-export { runUntrustedCode } from './standalone';
-export { RunUntrustedCodeOptions, ExecuteResponse } from './types';
+export { runUntrustedCode, getStructuredError } from './standalone';
+export { RunUntrustedCodeOptions, ExecuteResponse, StructuredError } from './types';

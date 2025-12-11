@@ -1,5 +1,5 @@
 import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
-import { ExecuteRequest, ExecuteResponse, RunUntrustedCodeOptions } from './types';
+import { ExecuteRequest, ExecuteResponse, RunUntrustedCodeOptions, StructuredError } from './types';
 
 /**
  * Execute untrusted JavaScript code in a secure AWS Lambda sandbox
@@ -107,4 +107,26 @@ export async function runUntrustedCode(
     }
     throw error;
   }
+}
+
+/**
+ * Extract structured error information from an ExecuteResponse
+ *
+ * @param response - The response from runUntrustedCode
+ * @returns StructuredError object with errorOutput and skipReason fields
+ *
+ * @example
+ * ```typescript
+ * const response = await runUntrustedCode({ code: 'return { skip_reason: "user_cancelled" }' });
+ * const structured = getStructuredError(response);
+ * if (structured.skipReason) {
+ *   console.log('Execution was skipped:', structured.skipReason);
+ * }
+ * ```
+ */
+export function getStructuredError(response: ExecuteResponse): StructuredError {
+  return {
+    errorOutput: response.error_reason,
+    skipReason: response.skip_reason,
+  };
 }

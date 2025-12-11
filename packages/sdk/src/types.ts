@@ -1,4 +1,22 @@
 /**
+ * Structured information extracted from user code return value
+ */
+export interface StructuredError {
+  /**
+   * Error output from unhandled errors or user-provided error_reason field.
+   * Set automatically when unexpected errors occur, or by user code when
+   * returning { error_reason: "reason" }.
+   */
+  errorOutput?: string;
+
+  /**
+   * Reason why execution was skipped.
+   * Set by user code when returning { skip_reason: "reason" } to skip automation.
+   */
+  skipReason?: string;
+}
+
+/**
  * Options for executing JavaScript code
  */
 export interface RunUntrustedCodeOptions {
@@ -41,6 +59,10 @@ export interface RunUntrustedCodeOptions {
    * This object will be available as the `options` parameter in the async main function.
    * User code is automatically wrapped in: `(async function main(options) { <user-code> })(options)`
    *
+   * To skip automation, return an object with `skip_reason` or `error_reason`:
+   * `return { skip_reason: "user_cancelled", ...otherData }`
+   * `return { error_reason: "validation_failed", ...otherData }`
+   *
    * @default undefined
    * @example { userId: '123', apiKey: 'secret' }
    */
@@ -62,14 +84,20 @@ export interface ExecuteRequest {
  * Response interface from JavaScript execution
  */
 export interface ExecuteResponse {
-  /** Whether execution was successful */
+  /** Whether the execution completed successfully */
   success: boolean;
 
-  /** The result of the execution (if successful) */
+  /** The result value returned from user code (if successful) */
   result?: any;
 
-  /** Error message (if failed) */
+  /** Error message from the sandbox (if execution failed) */
   error?: string;
+
+  /** Reason why execution was skipped (from user code) */
+  skip_reason?: string;
+
+  /** Error reason from user code or unexpected errors */
+  error_reason?: string;
 
   /** Execution time in milliseconds */
   executionTimeMs: number;

@@ -49,6 +49,14 @@ struct ExecuteResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 
+    /// Reason why execution was skipped (from user code)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skip_reason: Option<String>,
+
+    /// Error reason (from user code or unexpected errors)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_reason: Option<String>,
+
     /// Execution time in milliseconds
     execution_time_ms: u128,
 
@@ -68,6 +76,8 @@ async fn function_handler(event: LambdaEvent<ExecuteRequest>) -> Result<ExecuteR
             success: false,
             result: None,
             error: Some("Code cannot be empty".to_string()),
+            skip_reason: None,
+            error_reason: None,
             execution_time_ms: 0,
             console_output: Vec::new(),
         });
@@ -80,6 +90,8 @@ async fn function_handler(event: LambdaEvent<ExecuteRequest>) -> Result<ExecuteR
             success: false,
             result: None,
             error: Some(format!("Code size exceeds maximum of {} bytes", MAX_CODE_SIZE)),
+            skip_reason: None,
+            error_reason: None,
             execution_time_ms: 0,
             console_output: Vec::new(),
         });
@@ -108,24 +120,51 @@ async fn function_handler(event: LambdaEvent<ExecuteRequest>) -> Result<ExecuteR
     ) {
         Ok(result) => {
             let execution_time = start.elapsed().as_millis();
-            info!("Execution successful (took {}ms)", execution_time);
+
+            // Extract skip_reason and error_reason from the result if present
+            let mut skip_reason = None;
+            let mut error_reason = None;
+
+            if let Some(obj) = result.value.as_object() {
+                if let Some(reason) = obj.get("skip_reason") {
+                    if let Some(reason_str) = reason.as_str() {
+                        skip_reason = Some(reason_str.to_string());
+                        info!("Execution completed with skip_reason: {} (took {}ms)", reason_str, execution_time);
+                    }
+                }
+                if let Some(reason) = obj.get("error_reason") {
+                    if let Some(reason_str) = reason.as_str() {
+                        error_reason = Some(reason_str.to_string());
+                        info!("Execution completed with error_reason: {} (took {}ms)", reason_str, execution_time);
+                    }
+                }
+            }
+
+            if skip_reason.is_none() && error_reason.is_none() {
+                info!("Execution successful (took {}ms)", execution_time);
+            }
 
             Ok(ExecuteResponse {
                 success: true,
                 result: Some(result.value),
                 error: None,
+                skip_reason,
+                error_reason,
                 execution_time_ms: execution_time,
                 console_output: result.console_output,
             })
         }
         Err(e) => {
             let execution_time = start.elapsed().as_millis();
-            info!("Execution failed: {} (took {}ms)", e, execution_time);
+            let error_msg = e.to_string();
+            info!("Execution failed: {} (took {}ms)", error_msg, execution_time);
 
             Ok(ExecuteResponse {
                 success: false,
                 result: None,
-                error: Some(e.to_string()),
+                error: Some(error_msg.clone()),
+                skip_reason: None,
+                error_reason: Some(error_msg), // Forward unexpected errors to error_reason
                 execution_time_ms: execution_time,
                 console_output: Vec::new(),
             })
