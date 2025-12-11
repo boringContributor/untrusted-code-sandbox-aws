@@ -696,4 +696,294 @@ mod tests {
             assert!(status >= 200 && status < 600, "Expected valid HTTP status for DELETE, got {}", status);
         }
     }
+
+    // Tests for unhandled exceptions and runtime errors
+    #[test]
+    fn test_accessing_property_on_undefined() {
+        let code = r#"
+            const obj = undefined;
+            return obj.name;
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("TypeError") || err.contains("undefined"));
+    }
+
+    #[test]
+    fn test_accessing_property_on_null() {
+        let code = r#"
+            const data = null;
+            return data.value;
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("TypeError") || err.contains("null"));
+    }
+
+    #[test]
+    fn test_accessing_nested_undefined_properties() {
+        let code = r#"
+            const data = { user: { name: 'John' } };
+            return data.user.profile.nested.value;
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("TypeError") || err.contains("undefined"));
+    }
+
+    #[test]
+    fn test_reference_error_undefined_variable() {
+        let code = r#"
+            return undefinedVariable;
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("ReferenceError") || err.contains("not defined"));
+    }
+
+    #[test]
+    fn test_calling_non_function() {
+        let code = r#"
+            const notAFunction = "string";
+            return notAFunction();
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("TypeError") || err.contains("not a function"));
+    }
+
+    #[test]
+    fn test_network_call_to_disallowed_domain() {
+        let code = r#"
+            try {
+                const response = await fetch("https://blocked-domain.com/api");
+                return { error: "should have failed" };
+            } catch (error) {
+                return { caught: true, message: error.message };
+            }
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &["allowed-domain.com"], None).unwrap();
+        let obj = result.value.as_object().unwrap();
+        assert_eq!(obj.get("caught").unwrap(), &serde_json::json!(true));
+        let message = obj.get("message").unwrap().as_str().unwrap();
+        assert!(message.contains("not in the allowlist") || message.contains("allowlist"));
+    }
+
+    #[test]
+    fn test_json_parse_error() {
+        let code = r#"
+            try {
+                return JSON.parse("{ invalid json }");
+            } catch (error) {
+                return { caught: true, type: error.constructor.name };
+            }
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None).unwrap();
+        let obj = result.value.as_object().unwrap();
+        assert_eq!(obj.get("caught").unwrap(), &serde_json::json!(true));
+        assert_eq!(obj.get("type").unwrap(), &serde_json::json!("SyntaxError"));
+    }
+
+    #[test]
+    fn test_array_out_of_bounds_access() {
+        let code = r#"
+            const arr = [1, 2, 3];
+            return arr[100].id;
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("TypeError") || err.contains("undefined"));
+    }
+
+    #[test]
+    fn test_promise_rejection() {
+        let code = r#"
+            await Promise.reject(new Error("Promise rejected"));
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Promise rejected"));
+    }
+
+    #[test]
+    fn test_async_error_in_promise_chain() {
+        let code = r#"
+            const data = await Promise.resolve({ items: [] })
+                .then(d => d.items.find(i => i.id === 1))
+                .then(item => item.name);
+            return data;
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("TypeError") || err.contains("undefined"));
+    }
+
+    #[test]
+    fn test_division_by_zero() {
+        // Division by zero in JavaScript returns Infinity, which cannot be represented in JSON
+        let code = r#"
+            return 1 / 0;
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None);
+        // Infinity cannot be converted to JSON, so it should error
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid float") || err.contains("float"));
+    }
+
+    #[test]
+    fn test_throw_custom_error() {
+        let code = r#"
+            throw new Error("Custom error message");
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Custom error message"));
+    }
+
+    #[test]
+    fn test_throw_string() {
+        let code = r#"
+            throw "String error";
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None);
+        assert!(result.is_err());
+        // String throws may have different formatting, just verify we got an error
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_network_invalid_url() {
+        let code = r#"
+            try {
+                const response = await fetch("not-a-valid-url");
+                return { error: "should have failed" };
+            } catch (error) {
+                return { caught: true, message: error.message };
+            }
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &["example.com"], None).unwrap();
+        let obj = result.value.as_object().unwrap();
+        assert_eq!(obj.get("caught").unwrap(), &serde_json::json!(true));
+        let message = obj.get("message").unwrap().as_str().unwrap();
+        assert!(message.contains("Invalid URL") || message.contains("URL"));
+    }
+
+    #[test]
+    fn test_network_blocked_localhost() {
+        let code = r#"
+            try {
+                const response = await fetch("http://localhost:8080/secret");
+                return { error: "should have failed" };
+            } catch (error) {
+                return { caught: true, message: error.message };
+            }
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &["localhost"], None).unwrap();
+        let obj = result.value.as_object().unwrap();
+        assert_eq!(obj.get("caught").unwrap(), &serde_json::json!(true));
+        let message = obj.get("message").unwrap().as_str().unwrap();
+        assert!(message.contains("private IP"));
+    }
+
+    #[test]
+    fn test_network_blocked_private_ip() {
+        let code = r#"
+            try {
+                const response = await fetch("http://192.168.1.1/admin");
+                return { error: "should have failed" };
+            } catch (error) {
+                return { caught: true, message: error.message };
+            }
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &["192.168.1.1"], None).unwrap();
+        let obj = result.value.as_object().unwrap();
+        assert_eq!(obj.get("caught").unwrap(), &serde_json::json!(true));
+        let message = obj.get("message").unwrap().as_str().unwrap();
+        assert!(message.contains("private IP"));
+    }
+
+    #[test]
+    fn test_options_property_access_when_undefined() {
+        let code = r#"
+            // options is undefined, accessing property should fail
+            return options.someProperty;
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("TypeError") || err.contains("undefined"));
+    }
+
+    #[test]
+    fn test_malformed_json_response_simulation() {
+        // Simulate a case where JSON parsing fails on response
+        let code = r#"
+            try {
+                const malformedJson = "<html>Not JSON</html>";
+                return JSON.parse(malformedJson);
+            } catch (error) {
+                return { caught: true, type: error.constructor.name, message: error.message };
+            }
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None).unwrap();
+        let obj = result.value.as_object().unwrap();
+        assert_eq!(obj.get("caught").unwrap(), &serde_json::json!(true));
+        assert_eq!(obj.get("type").unwrap(), &serde_json::json!("SyntaxError"));
+    }
+
+    #[test]
+    fn test_stack_overflow() {
+        let code = r#"
+            function recursive() {
+                return recursive();
+            }
+            return recursive();
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        // Should get stack overflow or max stack size exceeded
+        assert!(err.contains("stack") || err.contains("InternalError") || err.contains("recursion"));
+    }
+
+    #[test]
+    fn test_try_catch_handles_error_gracefully() {
+        let code = r#"
+            try {
+                const obj = undefined;
+                return obj.name;
+            } catch (error) {
+                return { caught: true, errorType: error.constructor.name, message: error.message };
+            }
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None).unwrap();
+        let obj = result.value.as_object().unwrap();
+        assert_eq!(obj.get("caught").unwrap(), &serde_json::json!(true));
+        assert_eq!(obj.get("errorType").unwrap(), &serde_json::json!("TypeError"));
+    }
+
+    #[test]
+    fn test_multiple_errors_first_one_caught() {
+        let code = r#"
+            try {
+                throw new Error("First error");
+                throw new Error("Second error");
+            } catch (error) {
+                return { message: error.message };
+            }
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None).unwrap();
+        let obj = result.value.as_object().unwrap();
+        assert_eq!(obj.get("message").unwrap(), &serde_json::json!("First error"));
+    }
 }
