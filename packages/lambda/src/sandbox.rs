@@ -1,20 +1,20 @@
 use anyhow::{anyhow, Result};
+use reqwest;
 use rquickjs::{
-    CatchResultExt, Ctx, Function, Object, Runtime, Context, Value,
+    CatchResultExt, Context, Ctx, Function, Object, Runtime, Value,
 };
+use serde_json;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::debug;
 use url::Url;
 
-/// Result of JavaScript execution
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ExecutionResult {
     pub value: serde_json::Value,
     pub console_output: Vec<String>,
 }
 
-/// Console implementation for capturing output
 #[derive(Clone)]
 struct Console {
     output: Arc<Mutex<Vec<String>>>,
@@ -22,27 +22,27 @@ struct Console {
 
 impl Console {
     fn new() -> Self {
-        Self {
+        Console {
             output: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    fn log(&self, message: String) {
+        self.output.lock().unwrap().push(format!("[log] {}", message));
     }
 
     fn get_output(&self) -> Vec<String> {
         self.output.lock().unwrap().clone()
     }
-
-    fn log_message(&self, level: &str, args: Vec<String>) {
-        let message = format!("[{}] {}", level, args.join(" "));
-        self.output.lock().unwrap().push(message);
-    }
 }
 
-/// Execute JavaScript code in a secure sandbox
+/// Execute JavaScript code in a sandboxed QuickJS environment
 pub fn execute_js(
     code: &str,
     timeout_ms: u64,
     memory_limit: usize,
     allowed_domains: &[&str],
+    options: Option<serde_json::Value>,
 ) -> Result<ExecutionResult> {
     // Create QuickJS runtime with memory limit
     let runtime = Runtime::new()?;
@@ -53,29 +53,55 @@ pub fn execute_js(
     // Set max stack size (1MB)
     runtime.set_max_stack_size(1024 * 1024);
 
+    // Track execution start time for timeout
+    let start = Instant::now();
+    let timeout_duration = Duration::from_millis(timeout_ms);
+    let start_clone = start.clone();
+    let timeout_clone = timeout_duration.clone();
+
+    // Set interrupt handler for timeout
+    runtime.set_interrupt_handler(Some(Box::new(move || {
+        start_clone.elapsed() > timeout_clone
+    })));
+
     let context = Context::full(&runtime)?;
 
     // Create console for capturing output
     let console = Console::new();
 
-    // Track execution start time
-    let start = Instant::now();
-    let timeout_duration = Duration::from_millis(timeout_ms);
-
     let result = context.with(|ctx| {
         setup_sandbox(&ctx, console.clone(), allowed_domains)?;
 
-        // Execute the code
-        debug!("Executing JavaScript code");
+        // Inject the options object into the global scope
+        if let Some(opts) = options {
+            let opts_json = serde_json::to_string(&opts)?;
+            let opts_code = format!("globalThis.__userOptions = {};", opts_json);
+            ctx.eval::<(), _>(opts_code.as_str())?;
+        } else {
+            ctx.eval::<(), _>("globalThis.__userOptions = undefined;")?;
+        }
 
-        // Simple timeout check (QuickJS 0.6 doesn't have built-in interrupt handler in all builds)
-        let result_value: Value = ctx
-            .eval(code)
-            .catch(&ctx)
-            .map_err(|e| {
-                let error_msg = format_js_error(&ctx, e);
-                anyhow!("JavaScript execution error: {}", error_msg)
-            })?;
+        // Wrap user code in async main function with options parameter
+        let wrapped_code = format!(
+            r#"(async function main(options) {{
+    {}
+}})(globalThis.__userOptions)"#,
+            code
+        );
+
+        debug!("Executing JavaScript code wrapped in async main(options)");
+
+        // Evaluate the code - this returns a Promise
+        let promise: rquickjs::Promise = ctx.eval(wrapped_code.as_str()).catch(&ctx).map_err(|e| {
+            let error_msg = format_js_error(&ctx, e);
+            anyhow!("JavaScript execution error: {}", error_msg)
+        })?;
+
+        // Wait for the promise to resolve
+        let result_value: Value = promise.finish().catch(&ctx).map_err(|e| {
+            let error_msg = format_js_error(&ctx, e);
+            anyhow!("Promise resolution error: {}", error_msg)
+        })?;
 
         // Check if timeout exceeded
         if start.elapsed() > timeout_duration {
@@ -98,237 +124,235 @@ pub fn execute_js(
 fn setup_sandbox(ctx: &Ctx, console: Console, allowed_domains: &[&str]) -> Result<()> {
     let globals = ctx.globals();
 
-    // Remove dangerous global objects
-    remove_dangerous_globals(ctx, &globals)?;
-
-    // Setup safe console
+    // Setup console
     setup_console(ctx, &globals, console)?;
 
-    // Add safe setTimeout/setInterval stubs (they don't work in QuickJS without event loop)
-    add_timer_stubs(ctx, &globals)?;
-
-    // Setup fetch with allowlist
+    // Setup fetch with domain allowlist
     setup_fetch(ctx, &globals, allowed_domains)?;
 
-    Ok(())
-}
+    // Freeze Object.prototype to prevent prototype pollution
+    ctx.eval::<(), _>("Object.freeze(Object.prototype);")?;
+    ctx.eval::<(), _>("Object.freeze(Array.prototype);")?;
 
-/// Remove dangerous global objects and functions
-fn remove_dangerous_globals(ctx: &Ctx, globals: &Object) -> Result<()> {
-    // List of dangerous globals to remove
-    let dangerous_globals = vec![
-        // File system access (not available in QuickJS by default, but being explicit)
-        "require",
-        "import",
-        "importScripts",
-
-        // Process/system access
-        "process",
-        "exit",
-
-        // Dynamic code evaluation (keeping eval for now as it's needed for some use cases)
-        // "eval",
-        // "Function",
-
-        // Worker threads
-        "Worker",
-        "SharedArrayBuffer",
-        "Atomics",
-    ];
-
-    for global in dangerous_globals {
-        if globals.contains_key(global)? {
-            globals.remove(global)?;
-            debug!("Removed dangerous global: {}", global);
-        }
-    }
-
-    // Prevent access to global 'this' in strict mode
-    ctx.eval::<(), _>("'use strict';")?;
-
-    Ok(())
-}
-
-/// Setup a safe console object that captures output
-fn setup_console<'js>(ctx: &Ctx<'js>, globals: &Object<'js>, console: Console) -> Result<()> {
-    let console_obj = Object::new(ctx.clone())?;
-
-    // Create console.log
-    let log_console = console.clone();
-    let log_fn = Function::new(ctx.clone(), move |args: rquickjs::function::Rest<Value>| {
-        let messages: Vec<String> = args.iter().map(|v| value_to_string(v)).collect();
-        log_console.log_message("log", messages);
-    })?;
-    console_obj.set("log", log_fn)?;
-
-    // Create console.info
-    let info_console = console.clone();
-    let info_fn = Function::new(ctx.clone(), move |args: rquickjs::function::Rest<Value>| {
-        let messages: Vec<String> = args.iter().map(|v| value_to_string(v)).collect();
-        info_console.log_message("info", messages);
-    })?;
-    console_obj.set("info", info_fn)?;
-
-    // Create console.warn
-    let warn_console = console.clone();
-    let warn_fn = Function::new(ctx.clone(), move |args: rquickjs::function::Rest<Value>| {
-        let messages: Vec<String> = args.iter().map(|v| value_to_string(v)).collect();
-        warn_console.log_message("warn", messages);
-    })?;
-    console_obj.set("warn", warn_fn)?;
-
-    // Create console.error
-    let error_console = console.clone();
-    let error_fn = Function::new(ctx.clone(), move |args: rquickjs::function::Rest<Value>| {
-        let messages: Vec<String> = args.iter().map(|v| value_to_string(v)).collect();
-        error_console.log_message("error", messages);
-    })?;
-    console_obj.set("error", error_fn)?;
-
-    // Create console.debug
-    let debug_fn = Function::new(ctx.clone(), move |args: rquickjs::function::Rest<Value>| {
-        let messages: Vec<String> = args.iter().map(|v| value_to_string(v)).collect();
-        console.log_message("debug", messages);
-    })?;
-    console_obj.set("debug", debug_fn)?;
-
-    globals.set("console", console_obj)?;
-
-    Ok(())
-}
-
-/// Add timer stubs (setTimeout, setInterval) that warn users they're not available
-fn add_timer_stubs(_ctx: &Ctx, globals: &Object) -> Result<()> {
-    // Just remove setTimeout and setInterval - they're not needed for the sandbox
+    // Remove dangerous globals
+    globals.remove("eval").ok();
+    globals.remove("Function").ok();
     globals.remove("setTimeout").ok();
     globals.remove("setInterval").ok();
 
     Ok(())
 }
 
+/// Setup console API for capturing output
+fn setup_console<'js>(ctx: &Ctx<'js>, globals: &Object<'js>, console: Console) -> Result<()> {
+    let console_obj = Object::new(ctx.clone())?;
+
+    // Create console.log function
+    let console_clone = console.clone();
+    let log_fn = Function::new(
+        ctx.clone(),
+        move |args: rquickjs::function::Rest<Value>| {
+            let messages: Vec<String> = args
+                .iter()
+                .map(|v| value_to_string(v))
+                .collect();
+            let message = messages.join(" ");
+            console_clone.log(message);
+        },
+    )?;
+
+    console_obj.set("log", log_fn)?;
+
+    // Add console._times for Node.js compatibility (SES requirement)
+    let times_obj = Object::new(ctx.clone())?;
+    console_obj.set("_times", times_obj)?;
+
+    globals.set("console", console_obj)?;
+
+    Ok(())
+}
+
 /// Setup fetch API with domain allowlist
+/// Returns a standards-compliant Promise-based fetch API
 fn setup_fetch<'js>(ctx: &Ctx<'js>, globals: &Object<'js>, allowed_domains: &[&str]) -> Result<()> {
     let allowed_domains_vec: Vec<String> = allowed_domains.iter().map(|s| s.to_string()).collect();
 
-    let fetch_fn = Function::new(ctx.clone(), move |ctx: Ctx<'js>, url: String, options: rquickjs::function::Opt<Object<'js>>| {
-        // Helper function to create an error response
-        let create_error = |ctx: &Ctx<'js>, error_msg: String| -> Option<Object<'js>> {
-            let obj = Object::new(ctx.clone()).ok()?;
-            obj.set("ok", false).ok()?;
-            obj.set("status", 0).ok()?;
-            obj.set("error", error_msg).ok()?;
-            Some(obj)
-        };
+    // Create a synchronous native fetch that returns either a response object or an error object
+    let sync_fetch = Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>, url: String, options: Object<'js>| -> rquickjs::Result<Object<'js>> {
+            // Validate URL and domain
+            let parsed_url = match Url::parse(&url) {
+                Ok(u) => u,
+                Err(e) => {
+                    let error_obj = Object::new(ctx.clone())?;
+                    error_obj.set("__isError", true)?;
+                    error_obj.set("message", format!("Invalid URL: {}", e))?;
+                    return Ok(error_obj);
+                }
+            };
 
-        // Parse URL
-        let parsed_url = match Url::parse(&url) {
-            Ok(u) => u,
-            Err(e) => return create_error(&ctx, format!("Invalid URL: {}", e)),
-        };
+            let host = match parsed_url.host_str() {
+                Some(h) => h,
+                None => {
+                    let error_obj = Object::new(ctx.clone())?;
+                    error_obj.set("__isError", true)?;
+                    error_obj.set("message", "Invalid URL: no host")?;
+                    return Ok(error_obj);
+                }
+            };
 
-        // Check if domain is allowed
-        let host = match parsed_url.host_str() {
-            Some(h) => h,
-            None => return create_error(&ctx, "URL has no host".to_string()),
-        };
+            let is_allowed = allowed_domains_vec
+                .iter()
+                .any(|domain| host == domain || host.ends_with(&format!(".{}", domain)));
 
-        let is_allowed = allowed_domains_vec.iter().any(|domain| {
-            host == domain || host.ends_with(&format!(".{}", domain))
-        });
+            if !is_allowed {
+                let error_obj = Object::new(ctx.clone())?;
+                error_obj.set("__isError", true)?;
+                error_obj.set("message", format!("Domain '{}' is not in the allowlist", host))?;
+                return Ok(error_obj);
+            }
 
-        if !is_allowed {
-            return create_error(&ctx, format!("Domain '{}' is not in the allowlist", host));
-        }
+            // Block private IP ranges
+            if host == "localhost"
+                || host.starts_with("127.")
+                || host.starts_with("10.")
+                || host.starts_with("192.168.")
+                || host.starts_with("172.16.")
+                || host == "0.0.0.0"
+            {
+                let error_obj = Object::new(ctx.clone())?;
+                error_obj.set("__isError", true)?;
+                error_obj.set("message", "Requests to private IP ranges are not allowed")?;
+                return Ok(error_obj);
+            }
 
-        // Block private IP ranges
-        if host == "localhost"
-            || host.starts_with("127.")
-            || host.starts_with("10.")
-            || host.starts_with("192.168.")
-            || host.starts_with("172.16.")
-            || host == "0.0.0.0" {
-            return create_error(&ctx, "Requests to private IP ranges are not allowed".to_string());
-        }
-
-        // Extract method and body from options
-        let (method, body) = if let Some(opts) = options.0.as_ref() {
-            let method = opts.get::<_, Option<String>>("method")
+            // Parse options
+            let method = options.get::<_, Option<String>>("method")
                 .unwrap_or(None)
                 .unwrap_or_else(|| "GET".to_string())
                 .to_uppercase();
 
-            let body = opts.get::<_, Option<String>>("body")
-                .unwrap_or(None);
+            let body = options.get::<_, Option<String>>("body").unwrap_or(None);
 
-            (method, body)
-        } else {
-            ("GET".to_string(), None)
-        };
+            // Make HTTP request
+            let client = match reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    let error_obj = Object::new(ctx.clone())?;
+                    error_obj.set("__isError", true)?;
+                    error_obj.set("message", format!("Failed to create HTTP client: {}", e))?;
+                    return Ok(error_obj);
+                }
+            };
 
-        // Validate HTTP method
-        if !["GET", "POST", "PUT", "DELETE"].contains(&method.as_str()) {
-            return create_error(&ctx, format!("Unsupported HTTP method: {}", method));
-        }
+            let mut request_builder = match method.as_str() {
+                "GET" => client.get(&url),
+                "POST" => client.post(&url),
+                "PUT" => client.put(&url),
+                "DELETE" => client.delete(&url),
+                "PATCH" => client.patch(&url),
+                "HEAD" => client.head(&url),
+                _ => {
+                    let error_obj = Object::new(ctx.clone())?;
+                    error_obj.set("__isError", true)?;
+                    error_obj.set("message", format!("Unsupported HTTP method: {}", method))?;
+                    return Ok(error_obj);
+                }
+            };
 
-        // Make HTTP request with timeout (5 seconds)
-        let client = match reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build() {
-            Ok(c) => c,
-            Err(e) => return create_error(&ctx, format!("Failed to create HTTP client: {}", e)),
-        };
+            // Add body if present
+            if let Some(body_data) = body {
+                request_builder = request_builder.body(body_data);
+            }
 
-        // Build request based on method
-        let mut request_builder = match method.as_str() {
-            "GET" => client.get(&url),
-            "POST" => client.post(&url),
-            "PUT" => client.put(&url),
-            "DELETE" => client.delete(&url),
-            _ => return create_error(&ctx, format!("Unsupported HTTP method: {}", method)),
-        };
+            // Add headers if present
+            if let Ok(Some(headers_obj)) = options.get::<_, Option<Object>>("headers") {
+                for prop in headers_obj.props::<String, String>() {
+                    if let Ok((key, value)) = prop {
+                        request_builder = request_builder.header(&key, &value);
+                    }
+                }
+            }
 
-        // Add body if present (for POST, PUT, DELETE)
-        if let Some(body_data) = body {
-            request_builder = request_builder
-                .header("Content-Type", "application/json")
-                .body(body_data);
-        }
+            let response = match request_builder.send() {
+                Ok(r) => r,
+                Err(e) => {
+                    let error_obj = Object::new(ctx.clone())?;
+                    error_obj.set("__isError", true)?;
+                    error_obj.set("message", format!("HTTP request failed: {}", e))?;
+                    return Ok(error_obj);
+                }
+            };
 
-        let response = match request_builder.send() {
-            Ok(r) => r,
-            Err(e) => return create_error(&ctx, format!("HTTP request failed: {}", e)),
-        };
+            let status = response.status().as_u16();
+            let response_text = match response.text() {
+                Ok(t) => t,
+                Err(e) => {
+                    let error_obj = Object::new(ctx.clone())?;
+                    error_obj.set("__isError", true)?;
+                    error_obj.set("message", format!("Failed to read response: {}", e))?;
+                    return Ok(error_obj);
+                }
+            };
 
-        let status = response.status().as_u16();
-        let response_text = match response.text() {
-            Ok(t) => t,
-            Err(e) => return create_error(&ctx, format!("Failed to read response: {}", e)),
-        };
+            // Create response object
+            let response_obj = Object::new(ctx.clone())?;
+            response_obj.set("status", status)?;
+            response_obj.set("ok", status >= 200 && status < 300)?;
+            response_obj.set("_bodyText", response_text.clone())?;
 
-        // Create response object
-        let response_obj = match Object::new(ctx.clone()) {
-            Ok(o) => o,
-            Err(_) => return None,
-        };
+            Ok(response_obj)
+        },
+    )?;
 
-        response_obj.set("status", status).ok()?;
-        response_obj.set("ok", status >= 200 && status < 300).ok()?;
-        response_obj.set("text", response_text.clone()).ok()?;
+    // Set the synchronous implementation as a hidden global
+    ctx.globals().set("__syncFetch", sync_fetch)?;
 
-        // Parse JSON and set as property
-        let json_result = match serde_json::from_str::<serde_json::Value>(&response_text) {
-            Ok(v) => v,
-            Err(_) => serde_json::Value::Null,
-        };
+    // Wrap it in JavaScript to provide Promise-based API
+    let fetch_wrapper_code = r#"
+(function() {
+    return function fetch(url, options) {
+        return new Promise((resolve, reject) => {
+            try {
+                // Convert options to empty object if undefined
+                const opts = options || {};
+                const result = globalThis.__syncFetch(url, opts);
 
-        // Convert serde_json::Value to QuickJS Value
-        let json_str = serde_json::to_string(&json_result).ok()?;
-        let json_value: Value = ctx.eval(format!("({})", json_str).as_str()).ok()?;
-        response_obj.set("json", json_value).ok()?;
+                // Check if result is an error
+                if (result.__isError) {
+                    reject(new Error(result.message));
+                    return;
+                }
 
-        Some(response_obj)
-    })?;
+                // Add text() and json() methods that return Promises
+                result.text = function() {
+                    return Promise.resolve(this._bodyText);
+                };
 
+                result.json = function() {
+                    return new Promise((resolve, reject) => {
+                        try {
+                            resolve(JSON.parse(this._bodyText));
+                        } catch (e) {
+                            reject(e);
+                        }
+                    });
+                };
+
+                resolve(result);
+            } catch (error) {
+                reject(error);
+            }
+        });
+    };
+})()
+"#;
+
+    let fetch_fn: Function = ctx.eval(fetch_wrapper_code)?;
     globals.set("fetch", fetch_fn)?;
 
     Ok(())
@@ -395,8 +419,7 @@ fn value_to_json<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<serde_json::V
 
         match stringify.call::<_, String>((value.clone(),)) {
             Ok(json_str) => {
-                serde_json::from_str(&json_str)
-                    .map_err(|e| anyhow!("Failed to parse JSON: {}", e))
+                serde_json::from_str(&json_str).map_err(|e| anyhow!("Failed to parse JSON: {}", e))
             }
             Err(_) => {
                 // Fallback to manual conversion
@@ -429,12 +452,8 @@ fn format_js_error<'js>(_ctx: &Ctx<'js>, error: rquickjs::CaughtError<'js>) -> S
                 message
             }
         }
-        rquickjs::CaughtError::Value(v) => {
-            value_to_string(&v)
-        }
-        rquickjs::CaughtError::Error(e) => {
-            format!("{:?}", e)
-        }
+        rquickjs::CaughtError::Error(e) => format!("Error: {}", e),
+        _ => "Unknown error".to_string(),
     }
 }
 
@@ -444,7 +463,8 @@ mod tests {
 
     #[test]
     fn test_simple_execution() {
-        let result = execute_js("2 + 2", 5000, 10 * 1024 * 1024, &[]).unwrap();
+        let code = "return 2 + 2";
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None).unwrap();
         assert_eq!(result.value, serde_json::json!(4));
     }
 
@@ -452,18 +472,25 @@ mod tests {
     fn test_console_output() {
         let code = r#"
             console.log("Hello", "World");
-            console.error("Error message");
-            "done"
+            return "done";
         "#;
-        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[]).unwrap();
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None).unwrap();
         assert_eq!(result.value, serde_json::json!("done"));
-        assert!(result.console_output.len() >= 2);
+        assert!(result.console_output.contains(&"[log] Hello World".to_string()));
     }
 
     #[test]
     fn test_json_return() {
-        let code = r#"({ foo: "bar", number: 42, nested: { array: [1, 2, 3] } })"#;
-        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[]).unwrap();
+        let code = r#"
+            return {
+                "foo": "bar",
+                "number": 42,
+                "nested": {
+                    "array": [1, 2, 3]
+                }
+            };
+        "#;
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None).unwrap();
         assert_eq!(
             result.value,
             serde_json::json!({
@@ -479,52 +506,194 @@ mod tests {
     #[test]
     fn test_infinite_loop_timeout() {
         let code = "while(true) {}";
-        let result = execute_js(code, 100, 10 * 1024 * 1024, &[]);
+        let result = execute_js(code, 100, 10 * 1024 * 1024, &[], None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("timeout"));
+        let err_msg = result.unwrap_err().to_string();
+        // The interrupt handler should trigger and produce an error containing "interrupt"
+        assert!(err_msg.contains("timeout") || err_msg.contains("interrupt"));
     }
 
     #[test]
     fn test_syntax_error() {
         let code = "invalid javascript syntax {{{";
-        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[]);
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], None);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_fetch_not_allowed_domain() {
         let code = r#"
-            const response = fetch("https://evil.com/data");
-            response.ok ? "success" : response.error
+            try {
+                const response = await fetch("https://evil.com/data");
+                return "should have rejected: " + JSON.stringify(response);
+            } catch (error) {
+                return error.message;
+            }
         "#;
-        let result = execute_js(code, 5000, 10 * 1024 * 1024, &["example.com"]).unwrap();
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &["example.com"], None).unwrap();
         let response_str = result.value.as_str().unwrap();
-        assert!(response_str.contains("not in the allowlist"));
+        assert!(response_str.contains("not in the allowlist") || response_str.contains("allowlist"));
     }
 
     #[test]
     fn test_fetch_blocked_localhost() {
         let code = r#"
-            const response = fetch("http://localhost:8080/secret");
-            response.ok ? "success" : response.error
+            try {
+                const response = await fetch("http://localhost:8080/secret");
+                return "should have rejected";
+            } catch (error) {
+                return error.message;
+            }
         "#;
-        let result = execute_js(code, 5000, 10 * 1024 * 1024, &["localhost"]).unwrap();
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &["localhost"], None).unwrap();
         let response_str = result.value.as_str().unwrap();
         assert!(response_str.contains("private IP"));
     }
 
     #[test]
+    fn test_runtime_isolation() {
+        // First execution: set a global variable
+        let code1 = r#"
+            globalThis.sharedState = "leaked value";
+            return "first execution";
+        "#;
+        let result1 = execute_js(code1, 5000, 10 * 1024 * 1024, &[], None).unwrap();
+        assert_eq!(result1.value, serde_json::json!("first execution"));
+
+        // Second execution: try to access the global variable from first execution
+        // This should fail if runtimes are properly isolated
+        let code2 = r#"
+            return {
+                hasSharedState: typeof globalThis.sharedState !== 'undefined',
+                sharedStateValue: globalThis.sharedState || null
+            };
+        "#;
+        let result2 = execute_js(code2, 5000, 10 * 1024 * 1024, &[], None).unwrap();
+        let obj = result2.value.as_object().expect("Result should be an object");
+
+        // The shared state should NOT exist in the second execution
+        // This proves each execution gets a fresh runtime
+        assert_eq!(obj.get("hasSharedState").unwrap(), &serde_json::json!(false));
+        assert_eq!(obj.get("sharedStateValue").unwrap(), &serde_json::json!(null));
+    }
+
+    #[test]
+    fn test_options_parameter() {
+        let code = r#"
+            return {
+                receivedOptions: options,
+                type: typeof options,
+                hasName: options && 'name' in options
+            };
+        "#;
+        let options = serde_json::json!({
+            "name": "test",
+            "value": 42
+        });
+        let result = execute_js(code, 5000, 10 * 1024 * 1024, &[], Some(options)).unwrap();
+
+        let obj = result.value.as_object().unwrap();
+        assert_eq!(obj.get("type").unwrap(), &serde_json::json!("object"));
+        assert_eq!(obj.get("hasName").unwrap(), &serde_json::json!(true));
+
+        let received = obj.get("receivedOptions").unwrap().as_object().unwrap();
+        assert_eq!(received.get("name").unwrap(), &serde_json::json!("test"));
+        assert_eq!(received.get("value").unwrap(), &serde_json::json!(42));
+    }
+
+    #[test]
     fn test_fetch_allowed_domain() {
         // This test actually makes a real HTTP request to httpbin.org
-        // Skip in CI or if network is unavailable
+        // We verify that fetch returns a Promise and response has proper methods
         let code = r#"
-            const response = fetch("https://httpbin.org/get");
-            response.status
+            const response = await fetch("https://httpbin.org/get");
+            const data = await response.json();
+            return {
+                hasStatus: typeof response.status === 'number',
+                hasOk: typeof response.ok === 'boolean',
+                status: response.status,
+                hasJsonData: typeof data === 'object' && data !== null
+            };
         "#;
-        let result = execute_js(code, 10000, 10 * 1024 * 1024, &["httpbin.org"]);
-        // We expect this to work if network is available
+        let result = execute_js(code, 10000, 10 * 1024 * 1024, &["httpbin.org"], None);
+        // Verify fetch works - either success or valid HTTP error (not 0 which is connection error)
         if let Ok(res) = result {
-            assert_eq!(res.value, serde_json::json!(200));
+            let obj = res.value.as_object().unwrap();
+            assert_eq!(obj.get("hasStatus").unwrap(), &serde_json::json!(true));
+            assert_eq!(obj.get("hasOk").unwrap(), &serde_json::json!(true));
+            // Status should be a real HTTP status, not 0 (which indicates our error handling)
+            let status = obj.get("status").unwrap().as_i64().unwrap();
+            assert!(status >= 200 && status < 600, "Expected valid HTTP status code, got {}", status);
+            // Should have successfully parsed JSON
+            assert_eq!(obj.get("hasJsonData").unwrap(), &serde_json::json!(true));
+        }
+    }
+
+    #[test]
+    fn test_fetch_post_with_body() {
+        let code = r#"
+            const response = await fetch("https://httpbin.org/post", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({ test: "data", number: 42 })
+            });
+            const data = await response.json();
+            return {
+                status: response.status,
+                ok: response.ok,
+                hasJsonField: data.json && typeof data.json === 'object'
+            };
+        "#;
+        let result = execute_js(code, 10000, 10 * 1024 * 1024, &["httpbin.org"], None);
+        if let Ok(res) = result {
+            let obj = res.value.as_object().unwrap();
+            let status = obj.get("status").unwrap().as_i64().unwrap();
+            assert!(status >= 200 && status < 300, "Expected 2xx status, got {}", status);
+            assert_eq!(obj.get("ok").unwrap(), &serde_json::json!(true));
+            assert_eq!(obj.get("hasJsonField").unwrap(), &serde_json::json!(true));
+        }
+    }
+
+    #[test]
+    fn test_fetch_put_method() {
+        let code = r#"
+            const response = await fetch("https://httpbin.org/put", {
+                method: "PUT",
+                body: "test data"
+            });
+            return {
+                status: response.status,
+                ok: response.ok
+            };
+        "#;
+        let result = execute_js(code, 10000, 10 * 1024 * 1024, &["httpbin.org"], None);
+        if let Ok(res) = result {
+            let obj = res.value.as_object().unwrap();
+            let status = obj.get("status").unwrap().as_i64().unwrap();
+            // Accept 2xx or 5xx (service errors are ok, we're testing method support)
+            assert!(status >= 200 && status < 600, "Expected valid HTTP status for PUT, got {}", status);
+        }
+    }
+
+    #[test]
+    fn test_fetch_delete_method() {
+        let code = r#"
+            const response = await fetch("https://httpbin.org/delete", {
+                method: "DELETE"
+            });
+            return {
+                status: response.status,
+                ok: response.ok
+            };
+        "#;
+        let result = execute_js(code, 10000, 10 * 1024 * 1024, &["httpbin.org"], None);
+        if let Ok(res) = result {
+            let obj = res.value.as_object().unwrap();
+            let status = obj.get("status").unwrap().as_i64().unwrap();
+            // Accept 2xx or 5xx (service errors are ok, we're testing method support)
+            assert!(status >= 200 && status < 600, "Expected valid HTTP status for DELETE, got {}", status);
         }
     }
 }

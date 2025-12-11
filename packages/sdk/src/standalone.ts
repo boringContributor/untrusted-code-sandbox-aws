@@ -34,9 +34,24 @@ import { ExecuteRequest, ExecuteResponse, RunUntrustedCodeOptions } from './type
  * // With network access
  * const result = await runUntrustedCode({
  *   code: `
- *     const response = fetch('https://api.example.com/data');
- *     response.ok ? response.json() : null
+ *     const response = await fetch('https://api.example.com/data');
+ *     return response.ok ? response.json() : null;
  *   `,
+ *   allowedDomains: ['api.example.com']
+ * });
+ *
+ * // With options parameter
+ * const result = await runUntrustedCode({
+ *   code: `
+ *     // options parameter is automatically available
+ *     const response = await fetch(options.apiUrl);
+ *     const data = await response.json();
+ *     return { userId: options.userId, data };
+ *   `,
+ *   options: {
+ *     userId: '123',
+ *     apiUrl: 'https://api.example.com/users/123'
+ *   },
  *   allowedDomains: ['api.example.com']
  * });
  * ```
@@ -63,6 +78,7 @@ export async function runUntrustedCode(
     timeoutMs: options.timeoutMs,
     memoryLimitBytes: options.memoryLimitBytes,
     allowedDomains: options.allowedDomains,
+    options: options.options,
   };
 
   const command = new InvokeCommand({

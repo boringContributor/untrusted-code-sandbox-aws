@@ -34,6 +34,17 @@ export interface RunUntrustedCodeOptions {
    * @example ['api.example.com', 'httpbin.org']
    */
   allowedDomains?: string[];
+
+  /**
+   * Optional options object to pass to the user code
+   *
+   * This object will be available as the `options` parameter in the async main function.
+   * User code is automatically wrapped in: `(async function main(options) { <user-code> })(options)`
+   *
+   * @default undefined
+   * @example { userId: '123', apiKey: 'secret' }
+   */
+  options?: any;
 }
 
 /**
@@ -44,6 +55,7 @@ export interface ExecuteRequest {
   timeoutMs?: number;
   memoryLimitBytes?: number;
   allowedDomains?: string[];
+  options?: any;
 }
 
 /**

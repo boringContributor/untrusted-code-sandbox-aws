@@ -1,6 +1,6 @@
 {
-  "name": "@untrusted-code/sdk",
-  "version": "1.0.0",
+  "name": "@epilot/untrusted-code-sdk",
+  "version": "1.0.1",
   "description": "TypeScript SDK for executing untrusted JavaScript code in AWS Lambda",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

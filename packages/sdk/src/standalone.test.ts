@@ -206,6 +206,27 @@ describe('runUntrustedCode', () => {
       expect(payload.allowedDomains).toEqual(['api.example.com']);
     });
 
+    it('should pass options parameter to Lambda', async () => {
+      mockSend.mockResolvedValueOnce({
+        Payload: new TextEncoder().encode(JSON.stringify({
+          success: true,
+          result: { userId: '123', name: 'John' },
+          executionTimeMs: 50,
+          consoleOutput: [],
+        })),
+      });
+
+      await runUntrustedCode({
+        code: 'return { userId: options.userId, name: options.name }',
+        options: { userId: '123', name: 'John' },
+      });
+
+      const payload = JSON.parse(
+        (InvokeCommand as any).mock.calls[0][0].Payload
+      );
+      expect(payload.options).toEqual({ userId: '123', name: 'John' });
+    });
+
     it('should handle execution errors gracefully', async () => {
       mockSend.mockResolvedValueOnce({
         Payload: new TextEncoder().encode(JSON.stringify({
